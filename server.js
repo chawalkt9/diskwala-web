@@ -1,6 +1,7 @@
 const express = require('express');
 const { chromium } = require('playwright');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -9,12 +10,24 @@ const USER_DATA_DIR = path.join(__dirname, '.browser-data');
 let browserContext = null;
 let isHeadless = true;
 
+// Helper to check if custom browser exists
+function getExecutablePath() {
+  const bravePath = '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser';
+  if (fs.existsSync(bravePath)) {
+    return bravePath;
+  }
+  return undefined; // Defaults to Playwright's bundled Chromium
+}
+
 async function getBrowserContext(headless = true) {
   if (browserContext) return browserContext;
   isHeadless = headless;
+
+  const executablePath = getExecutablePath();
+
   browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
     headless,
-    executablePath: '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    ...(executablePath && { executablePath }),
     viewport: { width: 1280, height: 720 },
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
