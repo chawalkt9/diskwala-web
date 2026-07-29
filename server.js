@@ -7,23 +7,23 @@ app.use(express.json());
 
 const USER_DATA_DIR = path.join(__dirname, '.browser-data');
 let browserContext = null;
-let isHeadless = true;
 
-async function getBrowserContext(headless = true) {
+async function getBrowserContext() {
   if (browserContext) return browserContext;
-  isHeadless = headless;
 
+  // Render par hamesha headless: true rakhna zaroori hai
   browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
-    headless,
+    headless: true,
     viewport: { width: 1280, height: 720 },
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-sync',
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu'
     ],
   });
   return browserContext;
@@ -41,24 +41,7 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Login — opens a visible browser for the user to log in via Google
-app.post('/api/login', async (_req, res) => {
-  try {
-    await closeBrowser();
-    const ctx = await getBrowserContext(false);
-    const page = await ctx.newPage();
-    await page.goto('https://www.diskwala.com/login');
-    res.json({
-      success: true,
-      message:
-        'Browser opened. Log in via Google, then click "Done Logging In" here.',
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Check if the user is logged in
+// Check auth status
 app.get('/api/check-auth', async (_req, res) => {
   try {
     const ctx = await getBrowserContext();
@@ -66,12 +49,12 @@ app.get('/api/check-auth', async (_req, res) => {
 
     const authPromise = page.waitForResponse(
       (r) => r.url().includes('/api/v1/auth'),
-      { timeout: 20000 }
+      { timeout: 15000 }
     );
 
     await page.goto('https://www.diskwala.com/dashboard', {
       waitUntil: 'domcontentloaded',
-      timeout: 20000,
+      timeout: 15000,
     });
 
     let loggedIn = false;
@@ -89,27 +72,14 @@ app.get('/api/check-auth', async (_req, res) => {
   }
 });
 
-// Switch to headless after login
-app.post('/api/switch-headless', async (_req, res) => {
-  try {
-    await closeBrowser();
-    await getBrowserContext(true);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Get download link for a diskwala URL
+// Get download link
 app.post('/api/get-download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const match = url.match(/\/app\/([a-f0-9]+)/);
   if (!match) {
-    return res
-      .status(400)
-      .json({ error: 'Invalid Diskwala URL. Expected: https://www.diskwala.com/app/<id>' });
+    return res.status(400).json({ error: 'Invalid Diskwala URL.' });
   }
 
   const fileId = match[1];
@@ -118,7 +88,6 @@ app.post('/api/get-download', async (req, res) => {
     const ctx = await getBrowserContext();
     const page = await ctx.newPage();
 
-    // Capture appicrypt headers from any API request on the page
     let capturedAppicrypt = '';
     let capturedTs = '';
 
@@ -130,7 +99,6 @@ app.post('/api/get-download', async (req, res) => {
       }
     });
 
-    // Navigate to trigger WASM token generation
     const tempInfoPromise = page.waitForResponse(
       (r) => r.url().includes('/api/v1/file/temp_info'),
       { timeout: 20000 }
@@ -138,18 +106,14 @@ app.post('/api/get-download', async (req, res) => {
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-    // Wait for temp_info to complete (confirms WASM loaded and token generated)
     const tempInfoResp = await tempInfoPromise;
     const tempInfo = await tempInfoResp.json().catch(() => null);
 
-    // Give WASM a moment
     await page.waitForTimeout(1000);
 
-    // Get cookies for the API domain
     const cookies = await ctx.cookies('https://ddudapidd.diskwala.com');
     const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
 
-    // Call the sign API with captured appicrypt token + auth cookies
     const signResponse = await page.request.post(
       'https://ddudapidd.diskwala.com/api/v1/file/sign',
       {
@@ -166,12 +130,7 @@ app.post('/api/get-download', async (req, res) => {
     );
 
     const signStatus = signResponse.status();
-    let signBody;
-    try {
-      signBody = await signResponse.json();
-    } catch {
-      signBody = await signResponse.text();
-    }
+    const signBody = await signResponse.json().catch(() => null);
 
     await page.close();
 
@@ -181,14 +140,6 @@ app.post('/api/get-download', async (req, res) => {
         fileId,
         fileInfo: tempInfo?.fileInfo || null,
         signData: signBody,
-      });
-    }
-
-    if (signStatus === 401) {
-      return res.json({
-        success: false,
-        error: 'Not logged in. Please click "Login" first and log in via Google.',
-        fileInfo: tempInfo?.fileInfo || null,
       });
     }
 
@@ -203,7 +154,7 @@ app.post('/api/get-download', async (req, res) => {
   }
 });
 
-// Proxy download — streams the file through our server
+// Proxy download
 app.get('/api/download', async (req, res) => {
   const downloadUrl = req.query.url;
   const fileName = req.query.name || 'download.mp4';
@@ -220,15 +171,11 @@ app.get('/api/download', async (req, res) => {
       timeout: 120000,
     });
 
-    const contentType =
-      response.headers()['content-type'] || 'application/octet-stream';
+    const contentType = response.headers()['content-type'] || 'application/octet-stream';
     const contentLength = response.headers()['content-length'];
 
     res.setHeader('Content-Type', contentType);
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${encodeURIComponent(fileName)}"`
-    );
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
     if (contentLength) res.setHeader('Content-Length', contentLength);
 
     const body = await response.body();
@@ -245,5 +192,5 @@ process.on('SIGINT', async () => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n  Diskwala Downloader running at http://localhost:${PORT}\n`);
+  console.log(`Diskwala Downloader running on port ${PORT}`);
 });
