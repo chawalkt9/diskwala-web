@@ -11,7 +11,7 @@ let browserContext = null;
 async function getBrowserContext() {
   if (browserContext) return browserContext;
 
-  // Render par hamesha headless: true rakhna zaroori hai
+  // Render par Playwright hamesha Headless mode me chalega
   browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
     headless: true,
     viewport: { width: 1280, height: 720 },
@@ -23,7 +23,7 @@ async function getBrowserContext() {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--disable-gpu'
+      '--disable-gpu',
     ],
   });
   return browserContext;
@@ -36,12 +36,48 @@ async function closeBrowser() {
   }
 }
 
-// Serve the frontend
+// Serve Frontend
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Check auth status
+// 1. Direct Redirect to Diskwala Login
+app.get('/login', (_req, res) => {
+  res.redirect('https://www.diskwala.com/login');
+});
+
+// 2. Set Session Cookies (User apne browser ki cookies ya authorization token yahan pass karega)
+app.post('/api/set-cookies', async (req, res) => {
+  const { cookies } = req.body; // Expecting array of cookie objects or raw string
+  if (!cookies) return res.status(400).json({ error: 'Cookies are required' });
+
+  try {
+    const ctx = await getBrowserContext();
+    
+    // Cookie string ko parse karke Playwright context me inject karein
+    if (typeof cookies === 'string') {
+      const parsedCookies = cookies.split(';').map((c) => {
+        const [name, ...val] = c.trim().split('=');
+        return {
+          name,
+          value: val.join('='),
+          domain: '.diskwala.com',
+          path: '/',
+        };
+      }).filter(c => c.name && c.value);
+
+      await ctx.addCookies(parsedCookies);
+    } else if (Array.isArray(cookies)) {
+      await ctx.addCookies(cookies);
+    }
+
+    res.json({ success: true, message: 'Session updated successfully!' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Check Auth Status
 app.get('/api/check-auth', async (_req, res) => {
   try {
     const ctx = await getBrowserContext();
@@ -72,7 +108,7 @@ app.get('/api/check-auth', async (_req, res) => {
   }
 });
 
-// Get download link
+// 4. Get Download Link
 app.post('/api/get-download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -154,7 +190,7 @@ app.post('/api/get-download', async (req, res) => {
   }
 });
 
-// Proxy download
+// 5. Proxy Download
 app.get('/api/download', async (req, res) => {
   const downloadUrl = req.query.url;
   const fileName = req.query.name || 'download.mp4';
